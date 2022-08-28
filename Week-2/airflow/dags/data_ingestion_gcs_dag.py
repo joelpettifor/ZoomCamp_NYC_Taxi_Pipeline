@@ -1,6 +1,7 @@
 import os
 import logging
 
+from datetime import datetime
 from airflow import DAG
 from airflow.utils.dates import days_ago
 from airflow.operators.bash import BashOperator
@@ -13,13 +14,12 @@ import pyarrow.parquet as pq
 
 PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 BUCKET = os.environ.get("GCP_GCS_BUCKET")
-
-dataset_file = "yellow_tripdata_2022-01.parquet"
+dataset_file = "yellow_tripdata_{{ execution_date.strftime(\'%Y-%m\')}}.parquet"
 dataset_url = f"https://d37ci6vzurychx.cloudfront.net/trip-data/{dataset_file}"
 path_to_local_home = os.environ.get("AIRFLOW_HOME", "/opt/airflow/")
 parquet_file = dataset_file.replace('.csv', '.parquet')
 BIGQUERY_DATASET = os.environ.get("BIGQUERY_DATASET", 'trips_data_all')
-
+gcs_path_template = "raw/yellow_tripdata/{{ execution_date.strftime(\'%Y\')}}/yellow_tripdata_{{ execution_date.strftime(\'%Y-%m\')}}.parquet"
 
 def format_to_parquet(src_file):
     if not src_file.endswith('.parque'):
@@ -29,7 +29,6 @@ def format_to_parquet(src_file):
     pq.write_table(table, src_file)
 
 
-# NOTE: takes 20 mins, at an upload speed of 800kbps. Faster if your internet has a better upload speed
 def upload_to_gcs(bucket, object_name, local_file):
     """
     Ref: https://cloud.google.com/storage/docs/uploading-objects#storage-upload-object-python
@@ -46,10 +45,8 @@ def upload_to_gcs(bucket, object_name, local_file):
 
     client = storage.Client()
     bucket = client.bucket(bucket)
-
     blob = bucket.blob(object_name)
     blob.upload_from_filename(local_file)
-
 
 default_args = {
     "owner": "airflow",
@@ -60,17 +57,20 @@ default_args = {
 
 # NOTE: DAG declaration - using a Context Manager (an implicit way)
 with DAG(
-    dag_id="data_ingestion_gcs_dag",
-    schedule_interval="@daily",
+    dag_id="yellow_taxi_data_ingestion",
+    schedule_interval="0 6 2 * *",
+    start_date=datetime(2019, 1, 1),
+    end_date=datetime(2022, 1 ,1),
     default_args=default_args,
-    catchup=False,
-    max_active_runs=1,
+    catchup=True,
+    max_active_runs=4,
     tags=['dtc-de'],
-) as dag:
+) as yellow_taxi_data_ingestion:
+
 
     download_dataset_task = BashOperator(
         task_id="download_dataset_task",
-        bash_command=f"curl -sSL {dataset_url} > {path_to_local_home}/{dataset_file}"
+        bash_command=f"curl -sSLf {dataset_url} > {path_to_local_home}/{dataset_file}"
     )
 
     format_to_parquet_task = PythonOperator(
@@ -87,24 +87,14 @@ with DAG(
         python_callable=upload_to_gcs,
         op_kwargs={
             "bucket": BUCKET,
-            "object_name": f"raw/{parquet_file}",
+            "object_name": gcs_path_template,
             "local_file": f"{path_to_local_home}/{parquet_file}",
         },
+    ) 
+
+    rm_task = BashOperator(
+        task_id="rm_task",
+        bash_command=f"rm {dataset_file} {parquet_file}"
     )
 
-    bigquery_external_table_task = BigQueryCreateExternalTableOperator(
-        task_id="bigquery_external_table_task",
-        table_resource={
-            "tableReference": {
-                "projectId": PROJECT_ID,
-                "datasetId": BIGQUERY_DATASET,
-                "tableId": "external_table",
-            },
-            "externalDataConfiguration": {
-                "sourceFormat": "PARQUET",
-                "sourceUris": [f"gs://{BUCKET}/raw/{parquet_file}"],
-            },
-        },
-    )
-
-    download_dataset_task >> format_to_parquet_task >> local_to_gcs_task >> bigquery_external_table_task
+    download_dataset_task >> format_to_parquet_task >> local_to_gcs_task >> rm_task
