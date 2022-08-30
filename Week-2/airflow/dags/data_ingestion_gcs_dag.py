@@ -28,7 +28,6 @@ def format_to_parquet(src_file):
     table = pq.ParquetFile(src_file)
     pq.write_table(table, src_file)
 
-
 def upload_to_gcs(bucket, object_name, local_file):
     """
     Ref: https://cloud.google.com/storage/docs/uploading-objects#storage-upload-object-python
@@ -66,7 +65,6 @@ with DAG(
     max_active_runs=4,
     tags=['dtc-de'],
 ) as yellow_taxi_data_ingestion:
-
 
     download_dataset_task = BashOperator(
         task_id="download_dataset_task",
